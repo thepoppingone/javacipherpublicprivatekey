@@ -12,10 +12,14 @@ import java.net.UnknownHostException;
 import java.security.PublicKey;
 import java.security.GeneralSecurityException;
 import java.security.NoSuchAlgorithmException;
+import java.security.MessageDigest;
 import javax.crypto.Cipher;
 import javax.crypto.SecretKey;
 import javax.crypto.KeyGenerator;
 import javax.crypto.SealedObject;
+import java.util.Arrays;
+import java.nio.charset.StandardCharsets;
+//import java.util.Base64.Decoder;
 
 /************************************************
 * This skeleton program is prepared for weak  *
@@ -36,6 +40,7 @@ class Amy {  // Amy is a TCP client
   private ObjectOutputStream toBryan;   // to send session key to Bryan
   private ObjectInputStream fromBryan;  // to read encrypted messages from Bryan
   private Crypto crypto;        // object for encryption and decryption
+  PublicKey pubKey;
   // file to store received and decrypted messages
   public static final String MESSAGE_FILE = "msgs.txt";
   
@@ -67,11 +72,18 @@ class Amy {  // Amy is a TCP client
       System.exit(1);
     }
     
+    // Receive public key sent by Bryan
+    if(receivePublicKey())
+    {
+      System.out.println("MD5 signature matches - Using the verified public key now");
+      sendSessionKey();  
+    }else{
+      System.out.println("Error:MD5 signature does not match");
+      System.exit(1);
+    }
     // Send session key to Bryan
-    sendSessionKey();
     
-    // Receive encrypted messages from Bryan,
-    // decrypt and save them to file
+    System.out.println("Start receiving messages now.");
     try{
       PrintWriter out = new PrintWriter(MESSAGE_FILE);
       while(true){
@@ -82,11 +94,49 @@ class Amy {  // Amy is a TCP client
     }
   }
   
+  // Receive public key from Bryan
+  public boolean receivePublicKey() {
+    
+    boolean notCorrupt = false;
+    
+    try{
+      
+      this.pubKey = (PublicKey)this.fromBryan.readObject();
+      byte[] digest = (byte[])this.fromBryan.readObject();
+      byte[] decryptedDigest = this.crypto.decryptDigest(digest);
+      
+      byte[] public_key = this.pubKey.getEncoded();
+      byte[] name = "bryan".getBytes(StandardCharsets.US_ASCII);
+      
+      MessageDigest md5 = MessageDigest.getInstance("MD5");
+      md5.update(name);
+      md5.update(public_key);
+      byte[] checkDigest = md5.digest();
+      
+      if (Arrays.equals(decryptedDigest,checkDigest)){
+        notCorrupt = true;
+      }else{
+        notCorrupt = false;
+      }
+      
+    } catch (IOException ioe) {
+      System.out.println("IO Exception Occured.");
+      System.exit(1);
+    } catch (ClassNotFoundException ioe) {
+      System.out.println("Error: cannot typecast to class SealedObject");
+      System.exit(1); 
+    } catch (NoSuchAlgorithmException ex){
+      System.out.println("No Such Algor Exception Thrown");
+      System.exit(1);
+    }
+    return notCorrupt;
+  }
+  
   // Send session key to Bryan
   public void sendSessionKey() {
     try {
       
-      SealedObject encryptedMsg = this.crypto.getSessionKey();
+      SealedObject encryptedMsg = this.crypto.getSessionKey(this.pubKey);
       this.toBryan.writeObject(encryptedMsg);
       
       System.out.println("Session Key sent to Bryan");
@@ -106,7 +156,7 @@ class Amy {  // Amy is a TCP client
       out.write(toWrite);
     } catch (IOException ioe) {
       // System.out.println("Error receiving session key from Bryan");
-      System.out.println("IO Exception - Write Ended");
+      System.out.println("Write Ended");
       out.close();
       System.exit(1);
     } catch (ClassNotFoundException ioe) {
@@ -122,26 +172,29 @@ class Amy {  // Amy is a TCP client
     
     // Bryan's public key, to be read from file
     private PublicKey pubKey;
+    private PublicKey berisignPubKey;
     // Amy generates a new session key for each communication session
     private SecretKey sessionKey;
     // File that contains Bryan' public key
     public static final String PUBLIC_KEY_FILE = "bryan.pub";
+    public static final String BERISIGN_PUBLIC_KEY_FILE = "berisign.pub";
     
     // Constructor
     public Crypto() {
       // Read Bryan's public key from file
-      readPublicKey();
+      readBerisignPublicKey();
       // Generate session key dynamically
       initSessionKey();
     }
     
     // Read Bryan's public key from file
-    public void readPublicKey() {
+    public void readBerisignPublicKey() {
       
       try {
         ObjectInputStream ois = 
-        new ObjectInputStream(new FileInputStream(PUBLIC_KEY_FILE));
-        this.pubKey = (PublicKey)ois.readObject();
+        new ObjectInputStream(new FileInputStream(BERISIGN_PUBLIC_KEY_FILE));
+        this.berisignPubKey = (PublicKey)ois.readObject();
+        System.out.println("Reading Berisign Public Key");
         ois.close();
       } catch (IOException oie) {
         System.out.println("Error reading public key from file");
@@ -151,7 +204,7 @@ class Amy {  // Amy is a TCP client
         System.exit(1);
       }
       
-      System.out.println("Public key read from file " + PUBLIC_KEY_FILE);
+      System.out.println("Berisign Public key read from file " + BERISIGN_PUBLIC_KEY_FILE);
       // key is stored as an object and need to be read using ObjectInputStream.
       // See how Bryan read his private key as an example.
     }
@@ -169,9 +222,10 @@ class Amy {  // Amy is a TCP client
     }
     
     // Seal session key with RSA public key in a SealedObject and return
-    public SealedObject getSessionKey() {
+    public SealedObject getSessionKey(PublicKey pubKey) {
       
       SealedObject sessionKeyObj = null;
+      this.pubKey = pubKey;
       
       try {
         // Amy must use the same RSA key/transformation as Bryan specified
@@ -179,11 +233,14 @@ class Amy {  // Amy is a TCP client
         cipher.init(Cipher.ENCRYPT_MODE, this.pubKey);
         byte[] rawKey = this.sessionKey.getEncoded();
         sessionKeyObj = new SealedObject(rawKey, cipher);
+        
         // RSA imposes size restriction on the object being encrypted (117 bytes).
         // Instead of sealing a Key object which is way over the size restriction,
         // we shall encrypt AES key in its byte format (using getEncoded() method).    
       } catch (GeneralSecurityException gse) {
-        System.out.println("Error: wrong cipher to encrypt message");
+        gse.printStackTrace();
+        System.out.println("stuck session?");
+        System.out.println("Error: wrong cipher to DECRYPT_MODE message");
         System.exit(1);
       } catch (IOException ioe) {
         System.out.println("Error creating SealedObject");
@@ -191,6 +248,27 @@ class Amy {  // Amy is a TCP client
       }
       
       return sessionKeyObj;       
+    }
+    
+    public byte[] decryptDigest(byte[] digest){
+      
+      byte[] decryptedDigest = digest;
+      
+      try{           
+        Cipher cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding"); 
+        //System.out.println(this.berisignPubKey.toString());
+        cipher.init(Cipher.DECRYPT_MODE, this.berisignPubKey);
+        
+        decryptedDigest = cipher.doFinal(digest);
+      } catch (GeneralSecurityException gse) {
+        System.out.println("Error: wrong cipher to decrypt message");
+        gse.printStackTrace();
+        System.exit(1);
+      } catch (Exception ex) {
+        ex.printStackTrace();
+      }
+      
+      return  decryptedDigest;
     }
     
     // Decrypt and extract a message from SealedObject
